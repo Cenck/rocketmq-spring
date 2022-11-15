@@ -23,6 +23,8 @@ import java.lang.reflect.Type;
 import java.nio.charset.Charset;
 import java.util.List;
 import java.util.Objects;
+import java.util.stream.Collectors;
+
 import org.apache.rocketmq.client.AccessChannel;
 import org.apache.rocketmq.client.consumer.DefaultMQPushConsumer;
 import org.apache.rocketmq.client.consumer.MessageSelector;
@@ -46,6 +48,7 @@ import org.apache.rocketmq.spring.annotation.ConsumeMode;
 import org.apache.rocketmq.spring.annotation.MessageModel;
 import org.apache.rocketmq.spring.annotation.RocketMQMessageListener;
 import org.apache.rocketmq.spring.annotation.SelectorType;
+import org.apache.rocketmq.spring.core.RocketMQBatchListener;
 import org.apache.rocketmq.spring.core.RocketMQListener;
 import org.apache.rocketmq.spring.core.RocketMQPushConsumerLifecycleListener;
 import org.apache.rocketmq.spring.core.RocketMQReplyListener;
@@ -113,6 +116,8 @@ public class DefaultRocketMQListenerContainer implements InitializingBean,
 
     private RocketMQListener rocketMQListener;
 
+    private RocketMQBatchListener rocketMQBatchListener;
+
     private RocketMQReplyListener rocketMQReplyListener;
 
     private RocketMQMessageListener rocketMQMessageListener;
@@ -136,8 +141,19 @@ public class DefaultRocketMQListenerContainer implements InitializingBean,
     private String tlsEnable;
     private String namespace;
     private long awaitTerminationMillisWhenShutdown;
-
+    private int consumeMessageBatchMaxSize;
     private String instanceName;
+
+    public int getConsumeMessageBatchMaxSize() {
+        return this.consumeMessageBatchMaxSize;
+    }
+
+    public void setConsumeMessageBatchMaxSize(int consumeMessageBatchMaxSize) {
+        this.consumeMessageBatchMaxSize = consumeMessageBatchMaxSize;
+        if (this.consumer != null){
+            this.consumer.setConsumeMessageBatchMaxSize(consumeMessageBatchMaxSize);
+        }
+    }
 
     public long getSuspendCurrentQueueTimeMillis() {
         return suspendCurrentQueueTimeMillis;
@@ -220,6 +236,15 @@ public class DefaultRocketMQListenerContainer implements InitializingBean,
         this.rocketMQListener = rocketMQListener;
     }
 
+    public RocketMQBatchListener getRocketMQBatchListener() {
+        return rocketMQBatchListener;
+    }
+
+    public void setRocketMQBatchListener(RocketMQBatchListener rocketMQBatchListener) {
+        this.rocketMQBatchListener = rocketMQBatchListener;
+    }
+
+
     public RocketMQReplyListener getRocketMQReplyListener() {
         return rocketMQReplyListener;
     }
@@ -250,6 +275,7 @@ public class DefaultRocketMQListenerContainer implements InitializingBean,
         this.suspendCurrentQueueTimeMillis = anno.suspendCurrentQueueTimeMillis();
         this.awaitTerminationMillisWhenShutdown = Math.max(0, anno.awaitTerminationMillisWhenShutdown());
         this.instanceName = anno.instanceName();
+        this.consumeMessageBatchMaxSize = anno.consumeMessageBatchMaxSize();
     }
 
     public ConsumeMode getConsumeMode() {
@@ -414,6 +440,17 @@ public class DefaultRocketMQListenerContainer implements InitializingBean,
         @SuppressWarnings("unchecked")
         @Override
         public ConsumeConcurrentlyStatus consumeMessage(List<MessageExt> msgs, ConsumeConcurrentlyContext context) {
+            if (rocketMQBatchListener != null){
+                try {
+                    rocketMQBatchListener.onMessageList(msgs.stream().map(DefaultRocketMQListenerContainer.this::doConvertMessage).collect(Collectors.toList()));
+                }catch (Exception e){
+                    MessageExt first = msgs.get(0);
+                    log.warn("consume message failed. firstMessageId:{}, topic:{}, reconsumeTimes:{}", first.getMsgId(), first.getTopic(), first.getReconsumeTimes(), e);
+                    context.setDelayLevelWhenNextConsume(delayLevelWhenNextConsume);
+                    return ConsumeConcurrentlyStatus.RECONSUME_LATER;
+                }
+                return ConsumeConcurrentlyStatus.CONSUME_SUCCESS;
+            }
             for (MessageExt messageExt : msgs) {
                 log.debug("received msg: {}", messageExt);
                 try {
@@ -437,6 +474,17 @@ public class DefaultRocketMQListenerContainer implements InitializingBean,
         @SuppressWarnings("unchecked")
         @Override
         public ConsumeOrderlyStatus consumeMessage(List<MessageExt> msgs, ConsumeOrderlyContext context) {
+            if (rocketMQBatchListener != null){
+                try {
+                    rocketMQBatchListener.onMessageList(msgs.stream().map(DefaultRocketMQListenerContainer.this::doConvertMessage).collect(Collectors.toList()));
+                }catch (Exception e){
+                    MessageExt first = msgs.get(0);
+                    log.warn("consume message failed. firstMessageId:{}, topic:{}, reconsumeTimes:{}", first.getMsgId(), first.getTopic(), first.getReconsumeTimes(), e);
+                    context.setSuspendCurrentQueueTimeMillis(suspendCurrentQueueTimeMillis);
+                    return ConsumeOrderlyStatus.SUSPEND_CURRENT_QUEUE_A_MOMENT;
+                }
+                return ConsumeOrderlyStatus.SUCCESS;
+            }
             for (MessageExt messageExt : msgs) {
                 log.debug("received msg: {}", messageExt);
                 try {
@@ -555,6 +603,8 @@ public class DefaultRocketMQListenerContainer implements InitializingBean,
         Class<?> targetClass;
         if (rocketMQListener != null) {
             targetClass = AopProxyUtils.ultimateTargetClass(rocketMQListener);
+        } else if (rocketMQBatchListener != null) {
+            targetClass = AopProxyUtils.ultimateTargetClass(rocketMQBatchListener);
         } else {
             targetClass = AopProxyUtils.ultimateTargetClass(rocketMQReplyListener);
         }
@@ -568,6 +618,9 @@ public class DefaultRocketMQListenerContainer implements InitializingBean,
             throw new RuntimeException("parameterType:" + messageType + " of onMessage method is not supported");
         }
         try {
+            if (rocketMQBatchListener != null) {
+                return new MethodParameter(targetClass.getMethod("onMessageList", List.class), 0);
+            }
             final Method method = targetClass.getMethod("onMessage", clazz);
             return new MethodParameter(method, 0);
         } catch (NoSuchMethodException e) {
@@ -580,6 +633,8 @@ public class DefaultRocketMQListenerContainer implements InitializingBean,
         Class<?> targetClass;
         if (rocketMQListener != null) {
             targetClass = AopProxyUtils.ultimateTargetClass(rocketMQListener);
+        } else if (rocketMQBatchListener != null) {
+            targetClass = AopProxyUtils.ultimateTargetClass(rocketMQBatchListener);
         } else {
             targetClass = AopProxyUtils.ultimateTargetClass(rocketMQReplyListener);
         }
@@ -589,7 +644,9 @@ public class DefaultRocketMQListenerContainer implements InitializingBean,
             if (Objects.nonNull(interfaces)) {
                 for (Type type : interfaces) {
                     if (type instanceof ParameterizedType &&
-                        (Objects.equals(((ParameterizedType) type).getRawType(), RocketMQListener.class) || Objects.equals(((ParameterizedType) type).getRawType(), RocketMQReplyListener.class))) {
+                        (Objects.equals(((ParameterizedType) type).getRawType(), RocketMQListener.class)
+                                || Objects.equals(((ParameterizedType) type).getRawType(), RocketMQBatchListener.class)
+                                || Objects.equals(((ParameterizedType) type).getRawType(), RocketMQReplyListener.class))) {
                         matchedGenericInterface = type;
                         break;
                     }
@@ -609,8 +666,8 @@ public class DefaultRocketMQListenerContainer implements InitializingBean,
     }
 
     private void initRocketMQPushConsumer() throws MQClientException {
-        if (rocketMQListener == null && rocketMQReplyListener == null) {
-            throw new IllegalArgumentException("Property 'rocketMQListener' or 'rocketMQReplyListener' is required");
+        if (rocketMQListener == null && rocketMQBatchListener == null && rocketMQReplyListener == null) {
+            throw new IllegalArgumentException("Property 'rocketMQListener' or 'rocketMQReplyListener' or 'rocketMQBatchListener' is required");
         }
         Assert.notNull(consumerGroup, "Property 'consumerGroup' is required");
         Assert.notNull(nameServer, "Property 'nameServer' is required");
@@ -648,6 +705,7 @@ public class DefaultRocketMQListenerContainer implements InitializingBean,
         consumer.setMaxReconsumeTimes(maxReconsumeTimes);
         consumer.setAwaitTerminationMillisWhenShutdown(awaitTerminationMillisWhenShutdown);
         consumer.setInstanceName(instanceName);
+        consumer.setConsumeMessageBatchMaxSize(consumeMessageBatchMaxSize);
         switch (messageModel) {
             case BROADCASTING:
                 consumer.setMessageModel(org.apache.rocketmq.common.protocol.heartbeat.MessageModel.BROADCASTING);
@@ -688,6 +746,8 @@ public class DefaultRocketMQListenerContainer implements InitializingBean,
             ((RocketMQPushConsumerLifecycleListener) rocketMQListener).prepareStart(consumer);
         } else if (rocketMQReplyListener instanceof RocketMQPushConsumerLifecycleListener) {
             ((RocketMQPushConsumerLifecycleListener) rocketMQReplyListener).prepareStart(consumer);
+        } else if (rocketMQBatchListener instanceof RocketMQPushConsumerLifecycleListener) {
+            ((RocketMQPushConsumerLifecycleListener) rocketMQBatchListener).prepareStart(consumer);
         }
 
     }

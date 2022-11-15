@@ -18,11 +18,11 @@
 package org.apache.rocketmq.spring.autoconfigure;
 
 import java.util.Collections;
-import java.util.concurrent.atomic.AtomicLong;
 import org.apache.rocketmq.client.AccessChannel;
 import org.apache.rocketmq.spring.annotation.ConsumeMode;
 import org.apache.rocketmq.spring.annotation.MessageModel;
 import org.apache.rocketmq.spring.annotation.RocketMQMessageListener;
+import org.apache.rocketmq.spring.core.RocketMQBatchListener;
 import org.apache.rocketmq.spring.core.RocketMQListener;
 import org.apache.rocketmq.spring.core.RocketMQReplyListener;
 import org.apache.rocketmq.spring.support.DefaultRocketMQListenerContainer;
@@ -47,8 +47,6 @@ public class ListenerContainerConfiguration implements ApplicationContextAware {
 
     private ConfigurableApplicationContext applicationContext;
 
-    private AtomicLong counter = new AtomicLong(0);
-
     private ConfigurableEnvironment environment;
 
     private RocketMQProperties rocketMQProperties;
@@ -70,12 +68,14 @@ public class ListenerContainerConfiguration implements ApplicationContextAware {
     public void registerContainer(String beanName, Object bean, RocketMQMessageListener annotation) {
         Class<?> clazz = AopProxyUtils.ultimateTargetClass(bean);
 
-        if (RocketMQListener.class.isAssignableFrom(bean.getClass()) && RocketMQReplyListener.class.isAssignableFrom(bean.getClass())) {
-            throw new IllegalStateException(clazz + " cannot be both instance of " + RocketMQListener.class.getName() + " and " + RocketMQReplyListener.class.getName());
+        if ((RocketMQListener.class.isAssignableFrom(bean.getClass()) && RocketMQReplyListener.class.isAssignableFrom(bean.getClass()))
+            || (RocketMQBatchListener.class.isAssignableFrom(bean.getClass()) && RocketMQListener.class.isAssignableFrom(bean.getClass()))
+            || (RocketMQBatchListener.class.isAssignableFrom(bean.getClass()) && RocketMQReplyListener.class.isAssignableFrom(bean.getClass()))) {
+            throw new IllegalStateException(clazz + " cannot be both instance of " + RocketMQListener.class.getName() + " , " + RocketMQReplyListener.class.getName() + " or " + RocketMQBatchListener.class);
         }
 
-        if (!RocketMQListener.class.isAssignableFrom(bean.getClass()) && !RocketMQReplyListener.class.isAssignableFrom(bean.getClass())) {
-            throw new IllegalStateException(clazz + " is not instance of " + RocketMQListener.class.getName() + " or " + RocketMQReplyListener.class.getName());
+        if (!RocketMQListener.class.isAssignableFrom(bean.getClass()) && !RocketMQReplyListener.class.isAssignableFrom(bean.getClass()) && !RocketMQBatchListener.class.isAssignableFrom(bean.getClass())) {
+            throw new IllegalStateException(clazz + " is not instance of " + RocketMQListener.class.getName() + " , " + RocketMQReplyListener.class.getName() + " or " + RocketMQBatchListener.class);
         }
 
         String consumerGroup = this.environment.resolvePlaceholders(annotation.consumerGroup());
@@ -92,9 +92,9 @@ public class ListenerContainerConfiguration implements ApplicationContextAware {
             return;
         }
         validate(annotation);
-
+        // use listener bean name, then we can get container by beanName easier.
         String containerBeanName = String.format("%s_%s", DefaultRocketMQListenerContainer.class.getName(),
-            counter.incrementAndGet());
+                beanName);
         GenericApplicationContext genericApplicationContext = (GenericApplicationContext) applicationContext;
 
         genericApplicationContext.registerBean(containerBeanName, DefaultRocketMQListenerContainer.class,
@@ -137,6 +137,8 @@ public class ListenerContainerConfiguration implements ApplicationContextAware {
             container.setRocketMQListener((RocketMQListener) bean);
         } else if (RocketMQReplyListener.class.isAssignableFrom(bean.getClass())) {
             container.setRocketMQReplyListener((RocketMQReplyListener) bean);
+        } else if (RocketMQBatchListener.class.isAssignableFrom(bean.getClass())) {
+            container.setRocketMQBatchListener((RocketMQBatchListener) bean);
         }
         container.setMessageConverter(rocketMQMessageConverter.getMessageConverter());
         container.setName(name);

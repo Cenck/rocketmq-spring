@@ -170,4 +170,9 @@ public @interface RocketMQMessageListener {
      * The property of "instanceName".
      */
     String instanceName() default "DEFAULT";
+
+    /**
+     * Batch consumption size.
+     */
+    int consumeMessageBatchMaxSize() default 1;
 }
